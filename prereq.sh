@@ -10,6 +10,9 @@ unzip awscliv2.zip
 ./aws/install --update
 ln -s /usr/local/bin/aws /usr/bin/aws
 
+
+yum install -y python3-dnf python3-pip
+
 #Install ansible
 echo "ENVIRONMENT_GROUP: ${ENVIRONMENT_GROUP}"
 
