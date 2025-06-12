@@ -22,7 +22,7 @@
         name:
           - gcc
           - libffi-devel
-          - python36-devel
+          - python3-libselinux
           - openssl-devel
         state: present
       become: yes
