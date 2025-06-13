@@ -1,23 +1,29 @@
 ---
-- hosts: localhost
+- name: Configure FTP Server with Python dependencies
+  hosts: localhost
   connection: local
   become: yes
   become_method: sudo
   become_user: root
   gather_facts: yes
   vars:
-    ansible_python_interpreter: /usr/libexec/platform-python # <-- ADD THIS LINE 
+    ansible_python_interpreter: /usr/libexec/platform-python
+
   tasks:
-    - name: "Include environment yaml file"
+    # Load variables
+    - name: Include environment variables
       include_vars: "/tmp/ftpserver_install/vars/env.yaml"
 
-    - name: "Include environment_group yaml file"
+    - name: Include environment group variables
       include_vars: "/tmp/ftpserver_install/vars/environment_group/{{environment_group}}.yaml"
 
-    - name: "sudo yum install -y libselinux-python3"
-      shell: "sudo yum install -y libselinux-python3"
-      register: message
-    - name: Install build dependencies for Python packages
+    # Install system dependencies
+    - name: Install SELinux Python3 bindings
+      yum:
+        name: libselinux-python3
+        state: present
+
+    - name: Install build dependencies
       yum:
         name:
           - gcc
@@ -25,153 +31,140 @@
           - python3-libselinux
           - openssl-devel
         state: present
-      become: yes
 
-    - name: "run python packages"
-      shell: "/usr/bin/python3 -m pip install --index-url {{py_nexus_url}} -r /tmp/ftpserver_install/requirements.txt --no-cache-dir"
-      register: result
-      ignore_errors: true
-      become: yes
+    # Python package installation
+    - name: Verify requirements.txt exists
+      stat:
+        path: "{{ playbook_dir }}/requirements.txt"
+      register: requirements_file
 
-    - name: "Download amazon-efs-utils files from s3"
-      shell: "aws s3 cp {{s3_install_bucket}}/amazon-efs-utils-{{amazon_efs_util_version}}.noarch.rpm /tmp/amazon-efs-utils.noarch.rpm"
-      register: message
-      environment: "{{proxy_env}}"
+    - name: Install Python packages
+      pip:
+        requirements: "{{ playbook_dir }}/requirements.txt"
+        executable: "/usr/bin/python3 -m pip"
+        extra_args: "--index-url {{ py_nexus_url }} --no-cache-dir"
+      when: requirements_file.stat.exists
+      ignore_errors: yes
 
-    - name: "print output"
-      debug: msg="{{ message.stdout }}"
+    # EFS utilities installation
+    - name: Download amazon-efs-utils
+      get_url:
+        url: "{{ s3_install_bucket }}/amazon-efs-utils-{{ amazon_efs_util_version }}.noarch.rpm"
+        dest: /tmp/amazon-efs-utils.noarch.rpm
+      environment: "{{ proxy_env }}"
 
-    - name: "sudo yum install -y /tmp/amazon-efs-utils.noarch.rpm"
-      shell: "sudo yum install -y /tmp/amazon-efs-utils.noarch.rpm"
-      register: message
-
-    - name: "print output"
-      debug: msg="{{ message.stdout }}"
-
-    - name: "add group devops"
-      group:
-        name: devops
-        state: present
-    
-    - name: "add group sftp"
-      group:
-        name: sftp
+    - name: Install amazon-efs-utils
+      yum:
+        name: /tmp/amazon-efs-utils.noarch.rpm
         state: present
 
-    - name: "Add the user 'devops' with a specific uid and a primary group of 'devops'"
+    # User and group management
+    - name: Create required groups
+      group:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - devops
+        - sftp
+
+    - name: Create users
       user:
-        name: devops
-        comment: devops
-        group: devops
+        name: "{{ item.name }}"
+        comment: "{{ item.name }}"
+        group: "{{ item.group }}"
+      loop:
+        - { name: 'devops', group: 'devops' }
+        - { name: 'sftp_wcrm', group: 'sftp' }
 
-    - name: "Add the user 'sftp_wcrm' with a specific uid and a primary group of 'sftp_wcrm'"
+    - name: Set user passwords
       user:
-        name: sftp_wcrm
-        comment: sftp_wcrm
-        group: sftp
+        name: "{{ item.name }}"
+        password: "{{ item.password | password_hash('sha512') }}"
+        update_password: always
+      loop:
+        - { name: 'devops', password: 'devops' }
+        - { name: 'sftp_wcrm', password: 'sftp_wcrm' }
 
-    - name: "update devops password"
-      shell: echo devops:devops | chpasswd 
-      register: result
-      become: yes
-
-    - name: "update sftp_wcrm password"
-      shell: echo sftp_wcrm:sftp_wcrm| chpasswd
-      register: result
-      become: yes
-
-    - name: "insert/update 'devops ALL=(ALL) NOPASSWD: ALL' configuration block in /etc/sudoers"
-      blockinfile:
-        path: /etc/sudoers
-        block: |
-          devops ALL=(ALL) NOPASSWD: ALL
-      ignore_errors: true
-
-    - name: "insert/update 'devops ALL=(ALL) NOPASSWD: ALL' configuration block in /etc/sudoers"
+    # Sudoers configuration
+    - name: Configure sudo access
       copy:
-        dest: /etc/sudoers.d/01-devops
-        content: |
-          devops ALL=(ALL) NOPASSWD: ALL
-      ignore_errors: true
+        dest: "/etc/sudoers.d/01-{{ item.user }}"
+        content: "{{ item.user }} ALL=(ALL) NOPASSWD: ALL\n"
+        validate: 'visudo -cf %s'
+      loop:
+        - { user: 'devops' }
+        - { user: 'sftp_wcrm' }
 
-    - name: "insert/update 'sftp_wcrm ALL=(ALL) NOPASSWD: ALL' configuration block in /etc/sudoers"
-      blockinfile:
-        path: /etc/sudoers
-        block: |
-          sftp_wcrm ALL=(ALL) NOPASSWD: ALL
-      ignore_errors: true
-
-    - name: "insert/update 'sftp_wcrm ALL=(ALL) NOPASSWD: ALL' configuration block in /etc/sudoers"
-      copy:
-        dest: /etc/sudoers.d/01-sftp_wcrm
-        content: |
-          sftp_wcrm ALL=(ALL) NOPASSWD: ALL
-      ignore_errors: true
-
-    - name: "create /home/sftp_wcrm folder"
+    # SFTP directory setup
+    - name: Create SFTP directory structure
       file:
-        path: /home/sftp_wcrm
+        path: "{{ item.path }}"
         state: directory
-        mode: 0755
+        mode: "{{ item.mode }}"
+        owner: "{{ item.owner | default(omit) }}"
+        group: "{{ item.group | default(omit) }}"
+      loop:
+        - { path: '/home/sftp_wcrm', mode: '0755' }
+        - { path: '/home/sftp_wcrm/.ssh', mode: '0700', owner: 'sftp_wcrm', group: 'sftp' }
 
-
-    - name: "create /home/sftp_wcrm/.ssh folder"
-      file:
-        path: /home/sftp_wcrm/.ssh
-        state: directory
-        mode: 0700
-        owner: sftp_wcrm
-        group: sftp
-
-    - name: "create /home/sftp_wcrm/.ssh/authorized_keys"
+    - name: Deploy SSH authorized key
       copy:
-        content: "{{edw_pub_key}}"
+        content: "{{ edw_pub_key }}"
         dest: "/home/sftp_wcrm/.ssh/authorized_keys"
-        mode: 0600
+        mode: '0600'
         owner: sftp_wcrm
         group: sftp
-      ignore_errors: true
 
-    - name: "get ssh host keys from s3"
-      shell: "aws s3 cp {{s3_install_bucket}}/host_keys/buildbox/ssh_host_keys.tar.gz /tmp"
-      environment: "{{proxy_env}}"
-      ignore_errors: true
+    # SSH configuration
+    - name: Download SSH host keys
+      get_url:
+        url: "{{ s3_install_bucket }}/host_keys/buildbox/ssh_host_keys.tar.gz"
+        dest: /tmp/ssh_host_keys.tar.gz
+      environment: "{{ proxy_env }}"
+      ignore_errors: yes
 
-   # - name: "Extract ssh_host_keys.tar.gz into /etc/ssh/"
-    #  unarchive:
-     #   src: /tmp/ssh_host_keys.tar.gz
-      #  dest: /etc/ssh/
-      #ignore_errors: true
-    - name: "Extract ssh_host_keys.tar.gz into /etc/ssh/"
-      command: "tar -xzvf /tmp/ssh_host_keys.tar.gz -C /etc/ssh/"
-      ignore_errors: true
-    - name: "Set correct permissions on SSH host keys"
+    - name: Extract SSH host keys
+      unarchive:
+        src: /tmp/ssh_host_keys.tar.gz
+        dest: /etc/ssh/
+        remote_src: yes
+      ignore_errors: yes
+
+    - name: Set SSH host key permissions
       file:
-        path: /etc/ssh/ssh_host_*
+        path: "/etc/ssh/ssh_host_{{ item }}"
         owner: root
         group: root
         mode: '0600'
-      ignore_errors: true
+      loop:
+        - ecdsa_key
+        - ecdsa_key.pub
+        - ed25519_key
+        - ed25519_key.pub
+        - rsa_key
+        - rsa_key.pub
+      ignore_errors: yes
 
-    - name: "comment string in /etc/ssh/sshd_config"
-      replace:
-        path: "/etc/ssh/sshd_config"
-        regexp: "#Port.*"
-        replace: "Port 22"
-      ignore_errors: true
-    
-    - name: "update publickey in /etc/ssh/sshd_config"
+    - name: Configure SSH daemon
       lineinfile:
-        path: "/etc/ssh/sshd_config"
-        regexp: "^#?PubkeyAuthentication\\\\s+.+"
-        line: "PubkeyAuthentication yes"
+        path: /etc/ssh/sshd_config
+        regexp: "^{{ item.regexp }}"
+        line: "{{ item.line }}"
         backup: yes
-      ignore_errors: true
+      loop:
+        - { regexp: '#Port.*', line: 'Port 22' }
+        - { regexp: '^#?PubkeyAuthentication\\s+.+', line: 'PubkeyAuthentication yes' }
 
-    - name: "restart sshd"
-      shell: "systemctl restart sshd"
+    - name: Restart SSH service
+      service:
+        name: sshd
+        state: restarted
 
-#    - name: "clean up"
-#      file:
-#        path: /tmp/ssh_host_keys.tar.gz
-#        state: absent
+    # Cleanup
+    - name: Remove temporary files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/amazon-efs-utils.noarch.rpm
+        - /tmp/ssh_host_keys.tar.gz

@@ -1,0 +1,14 @@
+Authlib
+certifi
+cffi
+chardet
+cryptography
+idna
+pycparser
+requests
+salesforce-bulk
+simple-salesforce
+six
+unicodecsv
+urllib3
+boto3
